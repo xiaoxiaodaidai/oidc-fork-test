@@ -1,0 +1,46 @@
+name: "Fork PR OIDC check"
+
+on:
+  pull_request:
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  check-fork-pr-oidc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report event context
+        run: |
+          echo "event_name: ${{ github.event_name }}"
+          echo "repository (base): ${{ github.repository }}"
+          echo "head_repo: ${{ github.event.pull_request.head.repo.full_name }}"
+          echo "base_repo: ${{ github.event.pull_request.base.repo.full_name }}"
+          echo "is fork PR: ${{ github.event.pull_request.head.repo.full_name != github.repository }}"
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL is set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo true || echo false)"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN is set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ] && echo true || echo false)"
+
+      - name: Attempt to request an OIDC token for the Marketplace audience
+        run: |
+          set -e
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ] || [ -z "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ]; then
+            echo "No OIDC token request URL/token available - cannot request an id-token at all (expected for restricted fork PR runs)."
+            exit 0
+          fi
+
+          response=$(curl -s -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=marketplace.visualstudio.com")
+          token=$(echo "$response" | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{console.log(JSON.parse(d).value||'')}catch(e){console.log('')}})")
+
+          if [ -z "$token" ]; then
+            echo "OIDC token request failed/empty: $response"
+            exit 0
+          fi
+
+          echo "Got an OIDC token. Decoding claims (no secrets printed)..."
+          payload=$(echo "$token" | cut -d. -f2)
+          mod=$(( ${#payload} % 4 ))
+          if [ "$mod" -eq 2 ]; then payload="${payload}=="; fi
+          if [ "$mod" -eq 3 ]; then payload="${payload}="; fi
+          echo "$payload" | tr '_-' '/+' | base64 -d 2>/dev/null | node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{const c=JSON.parse(d);console.log(JSON.stringify({repository:c.repository,repository_owner:c.repository_owner,ref:c.ref,event_name:c.event_name,job_workflow_ref:c.job_workflow_ref,base_ref:c.base_ref,head_ref:c.head_ref},null,2))})"
